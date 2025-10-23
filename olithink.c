@@ -36,12 +36,25 @@ typedef int Move;
 #define GET_RANK(sq) ((sq) / BOARD_WIDTH)
 #define GET_FILE(sq) ((sq) % BOARD_WIDTH)
 
-// Bitboard helpers for 80-square board (need > 64 bits)
-// We use two u64 values: low (bits 0-63) and high (bits 64-79)
+// Extended bitboard for 80-square board (10x8)
+// Square numbering: rank * 10 + file (file 0-9, rank 0-7)
+// Requires 80 bits, we use two u64 values
 typedef struct {
-	u64 low;
-	u64 high;
+	u64 low;   // bits 0-63 (squares 0-63)
+	u64 high;  // bits 64-127 (squares 64-79 used, 80-127 unused)
 } bb_t;
+
+// Helper macros for extended bitboards
+#define BB_EMPTY ((bb_t){0LL, 0LL})
+#define BB_SQUARE(sq) ((sq) < 64 ? (bb_t){1LL << (sq), 0LL} : (bb_t){0LL, 1LL << ((sq) - 64)})
+#define BB_TEST(bb, sq) ((sq) < 64 ? ((bb).low & (1LL << (sq))) : ((bb).high & (1LL << ((sq) - 64))))
+#define BB_SET(bb, sq) do { if ((sq) < 64) (bb).low |= (1LL << (sq)); else (bb).high |= (1LL << ((sq) - 64)); } while(0)
+#define BB_CLEAR(bb, sq) do { if ((sq) < 64) (bb).low &= ~(1LL << (sq)); else (bb).high &= ~(1LL << ((sq) - 64)); } while(0)
+#define BB_XOR(bb, sq) do { if ((sq) < 64) (bb).low ^= (1LL << (sq)); else (bb).high ^= (1LL << ((sq) - 64)); } while(0)
+#define BB_AND(a, b) ((bb_t){(a).low & (b).low, (a).high & (b).high})
+#define BB_OR(a, b) ((bb_t){(a).low | (b).low, (a).high | (b).high})
+#define BB_NOT(a) ((bb_t){~(a).low, ~(a).high})
+#define BB_NONEMPTY(bb) ((bb).low || (bb).high)
 
 #define CNODES 0xFFFF
 const int pval[] = {0, 100, 290, 0, 100, 310, 500, 950, 290};
@@ -105,7 +118,9 @@ const int pawnrun[] = {0, 0, 1, 8, 16, 32, 64, 128};
 #define PCA3(x, c) (pcaps[(x) | ((c)<<6) | 128] & (colorb[(c)^1] | ((BIT[ENPASS]) & (c ? 0xFF0000LL : 0xFF0000000000LL))))
 #define PCA4(x, c) (pcaps[(x) | ((c)<<6) | 256] & (colorb[(c)^1] | ((BIT[ENPASS]) & (c ? 0xFF0000LL : 0xFF0000000000LL))))
 
-#define RANK(x, y) (((x) & 0x38) == (y))
+// For 10x8 board: check if square x is in rank y
+// Ranks are numbered 0-7, square = rank*10+file
+#define RANK(x, y) (((x) / BOARD_WIDTH) == (y))
 #define TEST(f, b) (BIT[f] & (b))
 #define ENPASS (flags & 63)
 #define CASTLE (flags & 960)
@@ -131,8 +146,9 @@ static u64 pmoves[128];
 static u64 pcaps[384];
 static u64 nmoves[128];
 static u64 kmoves[128];
-static int _knight[8] = {-17,-10,6,15,17,10,-6,-15};
-static int _king[8] = {-9,-1,7,8,9,1,-7,-8};
+// Knight and King/Commoner move offsets for 10-wide board
+static int _knight[8] = {-21,-19,-12,-8,8,12,19,21};
+static int _king[8] = {-11,-10,-9,-1,1,9,10,11};
 static u64 BIT[128];
 static char LSB[0x10000];
 static char BITC[0x10000] ;      
@@ -196,15 +212,21 @@ void _parse_fen(char *fen) {
 		if (s == '/') {
 			row--;
 			col = 0;
-		} else if (s >= '1' && s <= '8') {
-			col += s - '0';
+		} else if (s >= '1' && s <= '9') {
+			// Handle '10' specially
+			if (s == '1' && pos[i] == '0') {
+				col += 10;
+				i++;  // skip the '0'
+			} else {
+				col += s - '0';
+			}
 		} else {
 			int p = _getpiece(s, &c);
-			if (p == KING) kingpos[c] = row*8 + col;
+			if (p == KING) kingpos[c] = row*BOARD_WIDTH + col;
 			else mat += c ? -pval[p] : pval[p];
 			hashb ^= hashxor[col | row << 3 | i << 6 | (c ? 512 : 0)];
-			setBit(row*8 + col, pieceb + p);
-			setBit(row*8 + (col++), colorb + c);			
+			setBit(row*BOARD_WIDTH + col, pieceb + p);
+			setBit(row*BOARD_WIDTH + (col++), colorb + c);			
 		}
 	}
 	onmove = mv == 'b' ? 1 : 0;
@@ -215,7 +237,7 @@ void _parse_fen(char *fen) {
 		if (s == 'Q') flags |= BIT[8];
 		if (s == 'q') flags |= BIT[9];
 	}
-	if (enps[0] >= 'a' && enps[0] <= 'h' && enps[1] >= '1' && enps[1] <= '8') flags |= 8*(enps[1] - '1') + enps[0] - 'a'; 
+	if (enps[0] >= 'a' && enps[0] <= 'j' && enps[1] >= '1' && enps[1] <= '8') flags |= BOARD_WIDTH*(enps[1] - '1') + enps[0] - 'a'; 
 	count = (fullm - 1)*2 + onmove + (halfm << 10);
 	for (i = 0; i < COUNT; i++) hstack[i] = 0LL;
 }
@@ -411,14 +433,16 @@ u64 attacked(int f, int c) {
 
 void _init_pawns(u64* moves, u64* caps, u64* freep, u64* filep, u64* helpp, int c) {
 	int i, j;
-	for (i = 0; i < 64; i++) {
-		int rank = i/8;
-		int file = i&7;
-		int m = i + (c ? -8 : 8);
+	for (i = 0; i < BOARD_SQUARES; i++) {
+		int rank = i/BOARD_WIDTH;
+		int file = i%BOARD_WIDTH;
+		if (file >= BOARD_FILES) continue;  // Skip invalid files
+		int m = i + (c ? -BOARD_WIDTH : BOARD_WIDTH);
 		pawnprg[i + (c << 6)] = pawnrun[c ? 7-rank : rank];
-		for (j = 0; j < 64; j++) {
-			int jrank = j/8;
-			int jfile = j&7;
+		for (j = 0; j < BOARD_SQUARES; j++) {
+			int jrank = j/BOARD_WIDTH;
+			int jfile = j%BOARD_WIDTH;
+			if (jfile >= BOARD_FILES) continue;
 			int dfile = (jfile - file)*(jfile - file);
 			if (dfile > 1) continue;
 			if ((c && jrank < rank) || (!c && jrank > rank)) {//The not touched half of the pawn
@@ -428,17 +452,17 @@ void _init_pawns(u64* moves, u64* caps, u64* freep, u64* filep, u64* helpp, int 
 				setBit(j, helpp + i);
 			}
 		}
-		if (m < 0 || m > 63) continue;
+		if (m < 0 || m >= BOARD_SQUARES) continue;
 		setBit(m, moves + i);
 		if (file > 0) {
-			m = i + (c ? -9 : 7);
-			if (m < 0 || m > 63) continue;
+			m = i + (c ? -(BOARD_WIDTH+1) : (BOARD_WIDTH-1));
+			if (m < 0 || m >= BOARD_SQUARES) continue;
 			setBit(m, caps + i);
 			setBit(m, caps + i + 128*(2 - c));
 		}
-		if (file < 7) {
-			m = i + (c ? -7 : 9);
-			if (m < 0 || m > 63) continue;
+		if (file < BOARD_FILES-1) {
+			m = i + (c ? -(BOARD_WIDTH-1) : (BOARD_WIDTH+1));
+			if (m < 0 || m >= BOARD_SQUARES) continue;
 			setBit(m, caps + i);
 			setBit(m, caps + i + 128*(c + 1));
 		}
@@ -447,10 +471,13 @@ void _init_pawns(u64* moves, u64* caps, u64* freep, u64* filep, u64* helpp, int 
 
 void _init_shorts(u64* moves, int* m) {
 	int i, j, n;
-	for (i = 0; i < 64; i++) {
+	for (i = 0; i < BOARD_SQUARES; i++) {
+		int ifile = i % BOARD_WIDTH;
+		if (ifile >= BOARD_FILES) continue;
 		for (j = 0; j < 8; j++) {
 			n = i + m[j];
-			if (n < 64 && n >= 0 && ((n & 7)-(i & 7))*((n & 7)-(i & 7)) <= 4) {
+			int nfile = n % BOARD_WIDTH;
+			if (n < BOARD_SQUARES && n >= 0 && nfile < BOARD_FILES && (nfile-ifile)*(nfile-ifile) <= 4) {
 				setBit(n, moves+i);
 			}
 		}
@@ -520,8 +547,8 @@ u64 _bishop135(int f, u64 board, int t) {
 }
 
 void displaym(Move m) {
-	printf("%c%c%c%c", 'a' + FROM(m) % 8, '1' + FROM(m) / 8,
-		'a' + TO(m) % 8, '1' + TO(m) / 8);
+	printf("%c%c%c%c", 'a' + FROM(m) % BOARD_WIDTH, '1' + FROM(m) / BOARD_WIDTH,
+		'a' + TO(m) % BOARD_WIDTH, '1' + TO(m) / BOARD_WIDTH);
 	if (PROM(m)) printf("%c", pieceChar[PROM(m)]+32);
 }
 
@@ -720,7 +747,7 @@ int generateCheckEsc(u64 ch, u64 apin, int c, int k, int *ml, int *mn) {
 	while (cc) {
 		int cf = pullLsb(&cc);
 		int p = identPiece(cf);
-		if (p == PAWN && RANK(cf, c ? 0x08 : 0x30)) 
+		if (p == PAWN && RANK(cf, c ? 0 : 7)) 
 			regPromotions(cf, c, ch, ml, mn, 1, 1);
 		else 
 			regMovesCaps(PREMOVE(cf, p), ch, 0LL, ml, mn);
@@ -751,12 +778,12 @@ int generateCheckEsc(u64 ch, u64 apin, int c, int k, int *ml, int *mn) {
 		bf = c ? f+8 : f-8;
 		if (bf < 0 || bf > 63) continue;
 		if (BIT[bf] & pieceb[PAWN] & colorb[c] & apin) {
-			if (RANK(bf, c ? 0x08 : 0x30)) 
+			if (RANK(bf, c ? 0 : 7)) 
 				regPromotions(bf, c, BIT[f], ml, mn, 0, 1);
 			else
 				regMovesCaps(PREMOVE(bf, PAWN), 0LL, BIT[f], ml, mn);
 		}
-		if (RANK(f, c ? 0x20 : 0x18) && (BOARD & BIT[bf]) == 0 && (BIT[c ? f+16 : f-16] & pieceb[PAWN] & colorb[c] & apin))
+		if (RANK(f, c ? 4 : 3) && (BOARD & BIT[bf]) == 0 && (BIT[c ? f+2*BOARD_WIDTH : f-2*BOARD_WIDTH] & pieceb[PAWN] & colorb[c] & apin))
 			regMovesCaps(PREMOVE(c ? f+16 : f-16, PAWN), 0LL, BIT[f], ml, mn);
 	}
 	return 1;
@@ -772,8 +799,8 @@ int generateNonCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 	while (b) {
 		f = pullLsb(&b);
 		m = PMOVE(f, c);
-		if (m && RANK(f, c ? 0x30 : 0x08)) m |= PMOVE(c ? f-8 : f+8, c);
-		if (RANK(f, c ? 0x08 : 0x30)) {
+		if (m && RANK(f, c ? 6 : 1)) m |= PMOVE(c ? f-BOARD_WIDTH : f+BOARD_WIDTH, c);
+		if (RANK(f, c ? 0 : 7)) {
 			u64 a = PCAP(f, c);
 			regPromotions(f, c, m, ml, mn, 0, 0);
 			if (a) regPromotions(f, c, a, ml, mn, 1, 0);
@@ -790,9 +817,9 @@ int generateNonCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 		m = 0LL;
 		if (t & 16) {
 			m = PMOVE(f, c);         
-			if (m && RANK(f, c ? 0x30 : 0x08)) m |= PMOVE(c ? f-8 : f+8, c);
+			if (m && RANK(f, c ? 6 : 1)) m |= PMOVE(c ? f-BOARD_WIDTH : f+BOARD_WIDTH, c);
 		}
-		if (RANK(f, c ? 0x08 : 0x30)) {
+		if (RANK(f, c ? 0 : 7)) {
 			u64 a = (t & 32) ? PCA3(f, c) : ((t & 64) ? PCA4(f, c) : 0LL);
 			regPromotions(f, c, m, ml, mn, 0, 0);
 			if (a) regPromotions(f, c, a, ml, mn, 1, 0);
@@ -862,7 +889,7 @@ int generateCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 	while (b) {
 		f = pullLsb(&b);
 		a = PCAP(f, c);
-		if (RANK(f, c ? 0x08 : 0x30)) {
+		if (RANK(f, c ? 0 : 7)) {
 			regMovesCaps(PREMOVE(f, PAWN) | _PROM(QUEEN), a, PMOVE(f, c), ml, mn);
 		} else {
 			if (ENPASS && (BIT[ENPASS] & pcaps[(f) | ((c)<<6)])) {
@@ -892,7 +919,7 @@ int generateCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 		} else {
 			a = PCA4(f, c);
 		}
-		if (RANK(f, c ? 0x08 : 0x30)) {
+		if (RANK(f, c ? 0 : 7)) {
 			regMovesCaps(PREMOVE(f, PAWN) | _PROM(QUEEN), a, m, ml, mn);
 		} else {
 			regMoves(PREMOVE(f, PAWN), a, ml, mn, 1);
@@ -1417,13 +1444,13 @@ int execMove(Move m) {
 }
 
 #define ISRANK(c) (c >= '1' && c <= '8')
-#define ISFILE(c) (c >= 'a' && c <= 'h')
+#define ISFILE(c) (c >= 'a' && c <= 'j')
 int ismove(Move m, int to, int from, int piece, int prom, int h) {
 	if (TO(m) != to) return 0;
 	if (from < 0 && PIECE(m) != piece) return 0;
 	if (from >= 0 && FROM(m) != from) return 0;
-	if (ISFILE(h) && (FROM(m) & 7) != h - 'a') return 0;
-	if (ISRANK(h) && (FROM(m) & 56) != 8*(h - '1')) return 0;
+	if (ISFILE(h) && (FROM(m) % BOARD_WIDTH) != h - 'a') return 0;
+	if (ISRANK(h) && (FROM(m) / BOARD_WIDTH) != (h - '1')) return 0;
 	if (prom && PROM(m) != prom) return 0;
 	return 1;
 }
@@ -1446,13 +1473,13 @@ int parseMove(char *s, int c, Move p) {
 		if (*s == '=') prom = _getpiece(s[1], &i);
 		else if (*s == '+');
 		else { // Algebraic Notation
-			from = c1 - 'a' + 8*(c2 - '1');
+			from = c1 - 'a' + BOARD_WIDTH*(c2 - '1');
 			c1 = *s++; c2 = *s++;
 			if (!ISFILE(c1) || !ISRANK(c2)) return -1;
 			prom = _getpiece(*s, &i);
 		}
 	}
-	to = c1 - 'a' + 8*(c2 - '1');
+	to = c1 - 'a' + BOARD_WIDTH*(c2 - '1');
 	if (p) {
 		if (ismove(p, to, from, piece, prom, h)) return p;
 		return 0;
