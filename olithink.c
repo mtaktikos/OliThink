@@ -26,9 +26,25 @@ typedef int Move;
 #define BISHOP 5
 #define ROOK 6
 #define QUEEN 7
+#define COMMONER 8
+
+#define BOARD_FILES 10
+#define BOARD_RANKS 8  
+#define BOARD_WIDTH 10  // Use 10 files directly
+#define BOARD_SQUARES (BOARD_WIDTH * BOARD_RANKS)  // 80 squares
+#define SQUARE(r, f) ((r) * BOARD_WIDTH + (f))
+#define GET_RANK(sq) ((sq) / BOARD_WIDTH)
+#define GET_FILE(sq) ((sq) % BOARD_WIDTH)
+
+// Bitboard helpers for 80-square board (need > 64 bits)
+// We use two u64 values: low (bits 0-63) and high (bits 64-79)
+typedef struct {
+	u64 low;
+	u64 high;
+} bb_t;
 
 #define CNODES 0xFFFF
-const int pval[] = {0, 100, 290, 0, 100, 310, 500, 950};
+const int pval[] = {0, 100, 290, 0, 100, 310, 500, 950, 290};
 const int pawnrun[] = {0, 0, 1, 8, 16, 32, 64, 128};
 
 #define FROM(x) ((x) & 63)
@@ -113,11 +129,11 @@ static u64 hashxor[4096];
 static u64 rays[0x10000];
 static u64 pmoves[128];
 static u64 pcaps[384];
-static u64 nmoves[64];
-static u64 kmoves[64];
+static u64 nmoves[128];
+static u64 kmoves[128];
 static int _knight[8] = {-17,-10,6,15,17,10,-6,-15};
 static int _king[8] = {-9,-1,7,8,9,1,-7,-8};
-static u64 BIT[64];
+static u64 BIT[128];
 static char LSB[0x10000];
 static char BITC[0x10000] ;      
 static int crevoke[64];
@@ -133,7 +149,7 @@ Move pv[64][64];
 int pvlength[64];
 int value[64];
 int iter;
-const char pieceChar[] = "*PNK.BRQ";
+const char pieceChar[] = "*PNK.BRQG";
 u64 searchtime, maxtime, starttime;
 int sabort, noabort;
 int ponder = 0, pondering = 0;
@@ -141,7 +157,7 @@ Move pon = 0;
 int count, flags, mat, onmove, engine =-1;
 int sd = 32;
 int kingpos[2];
-u64 pieceb[8];
+u64 pieceb[9];
 u64 colorb[2];
 char irbuf[256];
 #define BOARD (colorb[0] | colorb[1])
@@ -172,7 +188,7 @@ int book;
 void _parse_fen(char *fen) {
 	char s, mv, pos[128], cas[5], enps[3];
 	int c, i, halfm = 0, fullm = 1, col = 0, row = 7;
-	for (i = 0; i < 8; i++) pieceb[i] = 0LL;
+	for (i = 0; i < 9; i++) pieceb[i] = 0LL;
 	colorb[0] = colorb[1] = hashb = 0LL;
 	mat = book = i = c = cas[0] = enps[0] = 0;
 	sscanf(fen, "%s %c %s %s %d %d", pos, &mv, cas, enps, &halfm, &fullm);
@@ -207,7 +223,7 @@ void _parse_fen(char *fen) {
 int parseMoveNExec(char*, int, Move*);
 int parseMove(char*, int, Move);
 int protV2(char*);
-char *sfen = "rnbqkbnr/pppppppp/////PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+char *sfen = "rgnbkqbn1r/pppppppppp/10/10/10/10/PPPPPPPPPP/R1NBQKBNGR w - - 0 1";
 #define BKSIZE 1024
 Move bkmove[BKSIZE*32];
 int bkflag[BKSIZE];
@@ -323,6 +339,7 @@ int identPiece(int f) {
 	if (TEST(f, pieceb[ROOK])) return ROOK;
 	if (TEST(f, pieceb[QUEEN])) return QUEEN;
 	if (TEST(f, pieceb[KING])) return KING;
+	if (TEST(f, pieceb[COMMONER])) return COMMONER;
 	return ENP;
 }
 
