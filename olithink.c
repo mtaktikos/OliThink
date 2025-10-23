@@ -591,6 +591,7 @@ void move(Move m, int c) {
 	int t = TO(m);
 	int p = PIECE(m);
 	int a = CAP(m);
+	int newPiece = p; // Track what piece we promote to
 
 	xorBit(f, colorb+c);
 	xorBit(f, pieceb+p);
@@ -603,10 +604,7 @@ void move(Move m, int c) {
 	flags &= 960;
 	count += 0x401;
 	if (a) {
-		if (a == ENP) { // Enpassant Capture
-			t = (t&7) | (f&56);
-			a = PAWN;
-		} else if (a == ROOK && CASTLE) { //Revoke castling rights.
+		if (a == ROOK && CASTLE) { //Revoke castling rights.
 			flags &= crevoke[t];
 		}
 		xorBit(t, pieceb+a);
@@ -615,33 +613,55 @@ void move(Move m, int c) {
 		count &= 0x3FF; //Reset Fifty Counter
 		mat += c ? -pval[a] : +pval[a];
 	}
+	
+	// Automatic promotions when a piece moves
 	if (p == PAWN) {
-		if (((f^t)&8) == 0) flags |= f^24; //Enpassant
-		else if ((t&56) == 0 || (t&56) == 56) {
-			xorBit(t, pieceb+PAWN);
-			xorBit(t, pieceb+PROM(m));
-			XORHASH(t, PAWN, c);
-			XORHASH(t, PROM(m), c);
-			mat += c ? pval[PAWN] - pval[PROM(m)] : -pval[PAWN] + pval[PROM(m)];
-		}
+		// Pawn always promotes to Knight
+		newPiece = KNIGHT;
+		xorBit(t, pieceb+PAWN);
+		xorBit(t, pieceb+KNIGHT);
+		XORHASH(t, PAWN, c);
+		XORHASH(t, KNIGHT, c);
+		mat += c ? pval[PAWN] - pval[KNIGHT] : -pval[PAWN] + pval[KNIGHT];
 		count &= 0x3FF; //Reset Fifty Counter
+	} else if (p == KNIGHT) {
+		// Knight promotes to Bishop
+		newPiece = BISHOP;
+		xorBit(t, pieceb+KNIGHT);
+		xorBit(t, pieceb+BISHOP);
+		XORHASH(t, KNIGHT, c);
+		XORHASH(t, BISHOP, c);
+		mat += c ? pval[KNIGHT] - pval[BISHOP] : -pval[KNIGHT] + pval[BISHOP];
+	} else if (p == BISHOP) {
+		// Bishop promotes to Rook
+		newPiece = ROOK;
+		xorBit(t, pieceb+BISHOP);
+		xorBit(t, pieceb+ROOK);
+		XORHASH(t, BISHOP, c);
+		XORHASH(t, ROOK, c);
+		mat += c ? pval[BISHOP] - pval[ROOK] : -pval[BISHOP] + pval[ROOK];
+	} else if (p == ROOK) {
+		// Rook promotes to Queen
+		newPiece = QUEEN;
+		xorBit(t, pieceb+ROOK);
+		xorBit(t, pieceb+QUEEN);
+		XORHASH(t, ROOK, c);
+		XORHASH(t, QUEEN, c);
+		mat += c ? pval[ROOK] - pval[QUEEN] : -pval[ROOK] + pval[QUEEN];
+	} else if (p == QUEEN) {
+		// Queen promotes to Pawn if on ranks 2-7, else stays Queen
+		int rank = (t >> 3); // Get rank (0-7)
+		if (rank >= 1 && rank <= 6) { // Ranks 2-7 (0-indexed: 1-6)
+			newPiece = PAWN;
+			xorBit(t, pieceb+QUEEN);
+			xorBit(t, pieceb+PAWN);
+			XORHASH(t, QUEEN, c);
+			XORHASH(t, PAWN, c);
+			mat += c ? pval[QUEEN] - pval[PAWN] : -pval[QUEEN] + pval[PAWN];
+		}
 	} else if (p == KING) {
 		if (kingpos[c] == f) kingpos[c] = t; else kingpos[c] = f;
 		flags &= ~(320 << c); // Lose castling rights
-		if (((f^t)&3) == 2) { // Castle
-			if (t == 6) { f = 7; t = 5; }
-			else if (t == 2) { f = 0; t = 3; }
-			else if (t == 62) { f = 63; t = 61; }
-			else { f = 56; t = 59; }
-			xorBit(f, colorb+c);
-			xorBit(f, pieceb+ROOK);
-			xorBit(t, colorb+c);
-			xorBit(t, pieceb+ROOK);
-			XORHASH(f, ROOK, c);
-			XORHASH(t, ROOK, c);
-		}
-	} else if (p == ROOK && CASTLE) {
-		flags &= crevoke[f];
 	}
 }
 
@@ -703,17 +723,7 @@ int generateCheckEsc(u64 ch, u64 apin, int c, int k, int *ml, int *mn) {
 	while (cc) {
 		int cf = pullLsb(&cc);
 		int p = identPiece(cf);
-		if (p == PAWN && RANK(cf, c ? 0x08 : 0x30)) 
-			regPromotions(cf, c, ch, ml, mn, 1, 1);
-		else 
-			regMovesCaps(PREMOVE(cf, p), ch, 0LL, ml, mn);
-	}
-	if (ENPASS && (ch & pieceb[PAWN])) { //Enpassant capture of attacking Pawn
-		cc = PCAP(ENPASS, c^1) & pieceb[PAWN] & apin;
-		while (cc) {
-			int cf = pullLsb(&cc);
-			regMovesCaps(PREMOVE(cf, PAWN), BIT[ENPASS], 0LL, ml, mn);
-		}
+		regMovesCaps(PREMOVE(cf, p), ch, 0LL, ml, mn);
 	}
 	if (ch & (nmoves[k] | kmoves[k])) return 1; //We can't move anything between!
 
@@ -734,10 +744,7 @@ int generateCheckEsc(u64 ch, u64 apin, int c, int k, int *ml, int *mn) {
 		bf = c ? f+8 : f-8;
 		if (bf < 0 || bf > 63) continue;
 		if (BIT[bf] & pieceb[PAWN] & colorb[c] & apin) {
-			if (RANK(bf, c ? 0x08 : 0x30)) 
-				regPromotions(bf, c, BIT[f], ml, mn, 0, 1);
-			else
-				regMovesCaps(PREMOVE(bf, PAWN), 0LL, BIT[f], ml, mn);
+			regMovesCaps(PREMOVE(bf, PAWN), 0LL, BIT[f], ml, mn);
 		}
 		if (RANK(f, c ? 0x20 : 0x18) && (BOARD & BIT[bf]) == 0 && (BIT[c ? f+16 : f-16] & pieceb[PAWN] & colorb[c] & apin))
 			regMovesCaps(PREMOVE(c ? f+16 : f-16, PAWN), 0LL, BIT[f], ml, mn);
@@ -756,13 +763,7 @@ int generateNonCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 		f = pullLsb(&b);
 		m = PMOVE(f, c);
 		if (m && RANK(f, c ? 0x30 : 0x08)) m |= PMOVE(c ? f-8 : f+8, c);
-		if (RANK(f, c ? 0x08 : 0x30)) {
-			u64 a = PCAP(f, c);
-			regPromotions(f, c, m, ml, mn, 0, 0);
-			if (a) regPromotions(f, c, a, ml, mn, 1, 0);
-		} else {
-			regMoves(PREMOVE(f, PAWN), m, ml, mn, 0);
-		}
+		regMoves(PREMOVE(f, PAWN), m, ml, mn, 0);
 	}
 
 	b = pin & pieceb[PAWN]; 
@@ -775,13 +776,7 @@ int generateNonCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 			m = PMOVE(f, c);         
 			if (m && RANK(f, c ? 0x30 : 0x08)) m |= PMOVE(c ? f-8 : f+8, c);
 		}
-		if (RANK(f, c ? 0x08 : 0x30)) {
-			u64 a = (t & 32) ? PCA3(f, c) : ((t & 64) ? PCA4(f, c) : 0LL);
-			regPromotions(f, c, m, ml, mn, 0, 0);
-			if (a) regPromotions(f, c, a, ml, mn, 1, 0);
-		} else {
-			regMoves(PREMOVE(f, PAWN), m, ml, mn, 0);
-		}
+		regMoves(PREMOVE(f, PAWN), m, ml, mn, 0);
 	}
 
 	b = pieceb[KNIGHT] & cb;
@@ -794,19 +789,6 @@ int generateNonCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 	while (b) {
 		f = pullLsb(&b);
 		regMoves(PREMOVE(f, ROOK), RMOVE(f), ml, mn, 0);
-		if (CASTLE && !ch) {
-			if (c) {
-				if ((flags & 128) && (f == 63) && (RMOVE1(63) & BIT[61]))
-					if (!DUALATT(61, 62, c)) regMoves(PREMOVE(60, KING), BIT[62], ml, mn, 0);
-				if ((flags & 512) && (f == 56) && (RMOVE1(56) & BIT[59]))
-					if (!DUALATT(59, 58, c)) regMoves(PREMOVE(60, KING), BIT[58], ml, mn, 0);
-			} else {
-				if ((flags & 64) && (f == 7) && (RMOVE1(7) & BIT[5]))
-					if (!DUALATT(5, 6, c)) regMoves(PREMOVE(4, KING), BIT[6], ml, mn, 0);
-				if ((flags & 256) && (f == 0) && (RMOVE1(0) & BIT[3]))
-					if (!DUALATT(3, 2, c)) regMoves(PREMOVE(4, KING), BIT[2], ml, mn, 0);
-			}
-		}
 	}
 
 	b = pieceb[BISHOP] & cb;
@@ -845,21 +827,7 @@ int generateCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 	while (b) {
 		f = pullLsb(&b);
 		a = PCAP(f, c);
-		if (RANK(f, c ? 0x08 : 0x30)) {
-			regMovesCaps(PREMOVE(f, PAWN) | _PROM(QUEEN), a, PMOVE(f, c), ml, mn);
-		} else {
-			if (ENPASS && (BIT[ENPASS] & pcaps[(f) | ((c)<<6)])) {
-				u64 hh;
-				int clbd = ENPASS^8;
-				xorBit(clbd, colorb+(c^1));
-				hh = ROCC1(f);
-				if (!(hh & BIT[kingpos[c]]) || !(hh & colorb[c^1] & RQU)) {
-					a = a | BIT[ENPASS];
-				}
-				xorBit(clbd, colorb+(c^1));
-			}
-			regMoves(PREMOVE(f, PAWN), a, ml, mn, 1);
-		}
+		regMoves(PREMOVE(f, PAWN), a, ml, mn, 1);
 	}
 
 	b = pin & pieceb[PAWN]; 
@@ -875,11 +843,7 @@ int generateCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 		} else {
 			a = PCA4(f, c);
 		}
-		if (RANK(f, c ? 0x08 : 0x30)) {
-			regMovesCaps(PREMOVE(f, PAWN) | _PROM(QUEEN), a, m, ml, mn);
-		} else {
-			regMoves(PREMOVE(f, PAWN), a, ml, mn, 1);
-		}
+		regMoves(PREMOVE(f, PAWN), a, ml, mn, 1);
 	}
 
 	b = pieceb[KNIGHT] & cb;
