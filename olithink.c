@@ -412,6 +412,7 @@ int battacked(int f, int c) {
 	if (PCAP(f, c) & pieceb[PAWN]) return 1;
 	if (NCAP(f, c) & pieceb[KNIGHT]) return 1;
 	if (KCAP(f, c) & pieceb[KING]) return 1;
+	if (KCAP(f, c) & pieceb[COMMONER]) return 1;  // Commoner can attack
 	if (RCAP1(f, c) & RQU) return 1; 
 	if (RCAP2(f, c) & RQU) return 1; 
 	if (BCAP3(f, c) & BQU) return 1;
@@ -421,6 +422,7 @@ int battacked(int f, int c) {
 
 u64 reach(int f, int c) {
 	return (NCAP(f, c) & pieceb[KNIGHT])
+		| (KCAP(f, c) & pieceb[COMMONER])  // Commoner can attack
 		| (RCAP1(f, c) & RQU)
 		| (RCAP2(f, c) & RQU)
 		| (BCAP3(f, c) & BQU)
@@ -865,6 +867,13 @@ int generateNonCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 		regMoves(PREMOVE(f, QUEEN), RMOVE(f) | BMOVE(f), ml, mn, 0);
 	}
 
+	// Commoner moves like a King (non-royal)
+	b = pieceb[COMMONER] & cb;
+	while (b) {
+		f = pullLsb(&b);
+		regMoves(PREMOVE(f, COMMONER), KMOVE(f), ml, mn, 0);
+	}
+
 	b = pin & (pieceb[ROOK] | pieceb[BISHOP] | pieceb[QUEEN]); 
 	while (b) {
 		int p;
@@ -950,6 +959,13 @@ int generateCaps(u64 ch, int c, int f, u64 pin, int *ml, int *mn) {
 		regMoves(PREMOVE(f, QUEEN), RCAP(f, c) | BCAP(f,c), ml, mn, 1);
 	}
 
+	// Commoner captures like a King (non-royal)
+	b = pieceb[COMMONER] & cb;
+	while (b) {
+		f = pullLsb(&b);
+		regMoves(PREMOVE(f, COMMONER), KCAP(f, c), ml, mn, 1);
+	}
+
 	b = pin & (pieceb[ROOK] | pieceb[BISHOP] | pieceb[QUEEN]); 
 	while (b) {
 		int p;
@@ -1001,6 +1017,7 @@ int swap(Move m) //SEE Stuff
       else if ((temp = pieceb[BISHOP] & colorb[c] & attacks)) piece = BISHOP;
       else if ((temp = pieceb[ROOK] & colorb[c] & attacks)) piece = ROOK;
       else if ((temp = pieceb[QUEEN] & colorb[c] & attacks)) piece = QUEEN;
+      else if ((temp = pieceb[COMMONER] & colorb[c] & attacks)) piece = COMMONER;
       else if ((temp = pieceb[KING] & colorb[c] & attacks)) piece = KING;
       else break;
  
